@@ -12,9 +12,9 @@
 <p align="center">Battle.net and World of Warcraft addons on the Steam Deck, without leaving Gaming Mode.</p>
 
 <p align="center">
-<img src="docs/panel.png" width="32%"> <img src="docs/addons.png" width="32%"> <img src="docs/details.png" width="32%">
+<img src="docs/panel.png" width="32%"> <img src="docs/installed.jpg" width="32%"> <img src="docs/battlenet.jpg" width="32%">
 </p>
-<p align="center"><sub>The Quick Access panel, the addon browser, and an addon's details sheet (illustrations of the interface).</sub></p>
+<p align="center"><sub>The Quick Access panel (illustrated; Steam can't screenshot its own overlay), the addon manager, and Battle.net running under Proton on a Deck.</sub></p>
 
 ## What it does
 
