@@ -1,0 +1,17 @@
+{
+  "name": "FrostDeck",
+  "author": "Cody Conroy",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "battle.net",
+      "world of warcraft",
+      "addons",
+      "launcher",
+      "proton"
+    ],
+    "description": "Install Battle.net under Proton, launch Blizzard games straight from Steam with artwork, and manage World of Warcraft addons (ConsolePort one tap away) from Gaming Mode.",
+    "image": "https://raw.githubusercontent.com/cconroy11/FrostDeck/main/assets/banner.png"
+  }
+}
