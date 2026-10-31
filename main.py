@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import zipfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
@@ -41,8 +42,9 @@ import decky
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "py_modules"))
 
 from addons import (  # noqa: E402
-    ADDON_CATALOG, addon_by_id, custom_addon_entry, discover_flavors, group_folders, pick_release, read_addon_toc, tukui_supports,
-    package_fits, toc_interfaces, wowi_addon_entry, wowi_compatible,
+    ADDON_CATALOG, addon_by_id, curseforge_addon_entry, curseforge_newest, curseforge_pick, curseforge_type_for, custom_addon_entry, discover_flavors,
+    group_folders, pick_release, read_addon_toc, tukui_supports, package_fits, toc_interfaces, version_sort_key, wowi_addon_entry,
+    wowi_compatible,
 )
 from catalog import GAME_CATALOG, SGDB_BATTLENET_ID, STEAM_APP_IDS, resolve_game  # noqa: E402
 
@@ -98,12 +100,31 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "wow_addons": {},             # flavour dir -> addon id -> {version, folders}
     "custom_addons": [],          # user-added GitHub repos ("owner/name")
     "wowi_addons": {},            # WoWInterface id -> {name, author} for addons installed from there
+    "curseforge_api_key": None,   # personal CurseForge API key; overrides a key bundled with the plugin
+    "curseforge_addons": {},      # CurseForge project id -> {name, author} for addons installed from there
 }
 
 GITHUB_API = "https://api.github.com"
 WOWI_API = "https://api.mmoui.com/v3/game/WOW"
 TUKUI_API = "https://api.tukui.org/v1"
+CURSEFORGE_API = "https://api.curseforge.com/v1"
+CURSEFORGE_WOW_GAME_ID = 1
+# Builds can ship a project key in defaults/curseforge.key (gitignored), so
+# users never have to type one; a key saved in Settings takes precedence.
+CURSEFORGE_BUNDLED_KEY_FILE = "curseforge.key"
 ADDON_CACHE_TTL = 6 * 3600
+
+
+class HttpStatusError(RuntimeError):
+    """A server answered with a 4xx/5xx status."""
+
+    def __init__(self, status: int, url: str) -> None:
+        super().__init__(f"HTTP {status} from {urllib.parse.urlsplit(url).netloc}")
+        self.status = status
+
+
+class CurseForgeKeyError(RuntimeError):
+    """CurseForge refused the API key (401/403) for this request."""
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -313,28 +334,91 @@ class Plugin:
 
     use_curl: bool = False
 
-    def _http_get(self, url: str, headers: Optional[dict[str, str]] = None, timeout: int = 30) -> bytes:
-        """GET a URL, via urllib when its TLS works and via the system curl otherwise."""
-        merged = {"User-Agent": USER_AGENT, **(headers or {})}
-        if not self.use_curl:
-            try:
-                request = urllib.request.Request(url, headers=merged)
-                with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
-                    return response.read()
-            except Exception as error:
-                decky.logger.info("urllib GET failed (%s); using curl from now on", error)
-                self.use_curl = True
+    # Transport rule for _http_get and _download_file: urllib until it fails to
+    # connect (TLS, DNS, proxy), then the system curl for the rest of the session.
+    # An HTTP error status is retried once through curl, because some CDNs refuse
+    # Python's TLS client but serve curl; that doesn't switch transports.
+
+    def _curl(self, url: str, headers: dict[str, str], timeout: int, data: Optional[bytes] = None,
+              output_path: Optional[str] = None, on_progress: Any = None) -> bytes:
+        """Run curl; returns the body (or b"" when writing to output_path). Raises HttpStatusError on 4xx/5xx."""
         curl = shutil.which("curl")
         if not curl:
             raise RuntimeError("curl not found")
-        command = [curl, "-sS", "-L", "-f", "--max-time", str(timeout)]
-        for name, value in merged.items():
+        # No -f: the status is read from --write-out so errors keep their code.
+        command = [curl, "-sS", "-L", "--max-time", str(timeout), "-w", "\n%{http_code}"]
+        for name, value in headers.items():
             command += ["-H", f"{name}: {value}"]
+        if data is not None:
+            command += ["--data-binary", "@-"]
+        if output_path:
+            command += ["-o", output_path]
         command.append(url)
-        result = subprocess.run(command, capture_output=True, timeout=timeout + 10, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(f"curl exited {result.returncode}: {result.stderr.decode(errors='replace').strip()}")
-        return result.stdout
+        if output_path and on_progress:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            while proc.poll() is None:
+                on_progress(os.path.getsize(output_path) if os.path.exists(output_path) else 0, 0)
+                time.sleep(0.2)
+            stdout, stderr = proc.communicate()
+            returncode = proc.returncode
+        else:
+            result = subprocess.run(command, input=data, capture_output=True, timeout=timeout + 10, check=False)
+            stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
+        if returncode != 0:
+            raise RuntimeError(f"curl exited {returncode}: {stderr.decode(errors='replace').strip()}")
+        body, _, code = stdout.rpartition(b"\n")
+        status = int(code or 0)
+        if status >= 400:
+            raise HttpStatusError(status, url)
+        return body
+
+    def _http_get(self, url: str, headers: Optional[dict[str, str]] = None, timeout: int = 30, data: Optional[bytes] = None) -> bytes:
+        """GET (or POST, when `data` is given) a URL. Raises HttpStatusError for 4xx/5xx."""
+        merged = {"User-Agent": USER_AGENT, **(headers or {})}
+        if not self.use_curl:
+            try:
+                request = urllib.request.Request(url, headers=merged, data=data)
+                with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+                    return response.read()
+            except urllib.error.HTTPError as error:
+                if not shutil.which("curl"):
+                    raise HttpStatusError(error.code, url) from error
+                return self._curl(url, merged, timeout, data)
+            except Exception as error:
+                decky.logger.info("urllib GET failed (%s); using curl from now on", error)
+                self.use_curl = True
+        return self._curl(url, merged, timeout, data)
+
+    def _download_file(self, url: str, path: str, on_progress: Any, timeout: int = 300) -> None:
+        """
+        Stream a URL to a file, calling on_progress(received, total) as chunks
+        arrive (total is 0 when the server doesn't say). Raises HttpStatusError for 4xx/5xx.
+        """
+        headers = {"User-Agent": USER_AGENT}
+        if not self.use_curl:
+            try:
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=60, context=_ssl_context()) as response, open(path, "wb") as out:
+                    total = int(response.headers.get("Content-Length") or 0)
+                    received = 0
+                    on_progress(0, total)
+                    while True:
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        received += len(chunk)
+                        on_progress(received, total)
+                return
+            except urllib.error.HTTPError as error:
+                if not shutil.which("curl"):
+                    raise HttpStatusError(error.code, url) from error
+            except Exception as error:
+                decky.logger.info("urllib download failed (%s); using curl from now on", error)
+                self.use_curl = True
+        self._curl(url, headers, timeout, output_path=path, on_progress=on_progress)
+        size = os.path.getsize(path)
+        on_progress(size, size)
 
     # ------------------------------------------------------------------ installer
 
@@ -518,6 +602,7 @@ class Plugin:
             "sgdb_api_key_set": bool(self.settings.get("sgdb_api_key")),
             "sgdb_plugin_installed": self._sgdb_plugin_installed(),
             "artwork_applied": self.settings.get("artwork_applied", {}),
+            "curseforge_key_source": self._cf_key_source(),
         }
 
     async def set_bnet_shortcut(self, app_id: int, phase: str) -> None:
@@ -556,6 +641,24 @@ class Plugin:
         self.settings["sgdb_api_key"] = cleaned
         self.settings["artwork_applied"] = {}   # a new key means art may now be available
         self._save_settings()
+
+    async def set_curseforge_api_key(self, key: Optional[str]) -> dict[str, Any]:
+        """Save (after checking it works) or clear the user's CurseForge key."""
+        cleaned = (key or "").strip() or None
+        if cleaned:
+            try:
+                await asyncio.to_thread(self._cf_get, "/games/1", None, cleaned)
+            except CurseForgeKeyError as error:
+                raise RuntimeError("CurseForge didn't accept that key. Check it was copied in full.") from error
+            except Exception as error:
+                raise RuntimeError(f"Couldn't reach CurseForge to check the key; try again ({str(error)[:80]})") from error
+        self.settings["curseforge_api_key"] = cleaned
+        self._save_settings()
+        self.cf_search_allowed = None   # a new key may be allowed to search
+        # list_addons worker threads may be writing to the cache; snapshot the keys before popping.
+        for addon_id in [addon_id for addon_id in list(self.addon_cache) if addon_id.startswith("cf:")]:
+            self.addon_cache.pop(addon_id, None)
+        return {"source": self._cf_key_source()}
 
     async def set_artwork_applied(self, code: str, applied: bool) -> None:
         done: dict[str, bool] = dict(self.settings.get("artwork_applied", {}))
@@ -848,11 +951,141 @@ class Plugin:
         self._save_settings()
 
     def _extra_addons(self) -> list[dict[str, Any]]:
-        """User-added GitHub repos and WoWInterface addons, which live in settings rather than the shipped catalog."""
+        """User-added GitHub repos, WoWInterface and CurseForge addons, which live in settings rather than the shipped catalog."""
         extras = [custom_addon_entry(repo) for repo in self.settings.get("custom_addons", [])]
         for uid, info in self.settings.get("wowi_addons", {}).items():
             extras.append(wowi_addon_entry(uid, info.get("name", f"WoWInterface #{uid}"), info.get("author", "")))
+        for mod_id, info in self.settings.get("curseforge_addons", {}).items():
+            extras.append(curseforge_addon_entry(mod_id, info.get("name", f"CurseForge #{mod_id}"), info.get("author", "")))
         return extras
+
+    # ------------------------------------------------------------------ curseforge
+
+    def _cf_bundled_key(self) -> Optional[str]:
+        # deploy.sh keeps defaults/ as a folder; Decky's zip packaging may copy its contents to the plugin root.
+        for folder in (os.path.join(decky.DECKY_PLUGIN_DIR, "defaults"), decky.DECKY_PLUGIN_DIR):
+            try:
+                with open(os.path.join(folder, CURSEFORGE_BUNDLED_KEY_FILE), "r", encoding="utf-8") as handle:
+                    key = handle.read().strip()
+                if key:
+                    return key
+            except OSError:
+                continue
+        return None
+
+    def _cf_key(self) -> Optional[str]:
+        return self.settings.get("curseforge_api_key") or self._cf_bundled_key()
+
+    def _cf_key_source(self) -> Optional[str]:
+        """Where the active key comes from: "user", "bundled", or None when CurseForge is off."""
+        if self.settings.get("curseforge_api_key"):
+            return "user"
+        return "bundled" if self._cf_bundled_key() else None
+
+    def _cf_get(self, path: str, params: Optional[dict[str, Any]] = None, key: Optional[str] = None, body: Optional[dict[str, Any]] = None) -> Any:
+        """GET (or POST `body` as JSON) to the CurseForge API and return its `data` field."""
+        api_key = key or self._cf_key()
+        if not api_key:
+            raise RuntimeError("CurseForge needs an API key; add one in FrostDeck's Settings")
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        headers = {"x-api-key": api_key, "Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        try:
+            response = self._http_get(f"{CURSEFORGE_API}{path}{query}", headers, data=json.dumps(body).encode() if body is not None else None)
+        except HttpStatusError as error:
+            if error.status in (401, 403):
+                raise CurseForgeKeyError("CurseForge rejected the API key") from error
+            raise
+        return json.loads(response).get("data")
+
+    def _cf_entry(self, mod_id: str) -> dict[str, Any]:
+        """Catalog entry for a CurseForge project, from settings or the API."""
+        known = self.settings.get("curseforge_addons", {}).get(str(mod_id))
+        if known:
+            return curseforge_addon_entry(str(mod_id), known.get("name", ""), known.get("author", ""))
+        mod = self._cf_get(f"/mods/{int(mod_id)}")
+        return curseforge_addon_entry(str(mod_id), str(mod.get("name") or ""), self._cf_author(mod))
+
+    @staticmethod
+    def _cf_author(mod: dict[str, Any]) -> str:
+        authors = mod.get("authors") or []
+        return str(authors[0].get("name") or "") if authors else ""
+
+    # Whether the key may call /mods/search. Some keys are issued without it;
+    # those still get details, files and the featured lists.
+    cf_search_allowed: Optional[bool] = None
+    cf_featured: Optional[dict[str, Any]] = None   # {"fetched_at", "mods": [...]}
+
+    def _cf_featured_mods(self) -> list[dict[str, Any]]:
+        """CurseForge's featured, popular and recently updated WoW addons, cached for a few hours."""
+        cached = self.cf_featured
+        if cached and time.time() - cached["fetched_at"] < ADDON_CACHE_TTL:
+            return cached["mods"]
+        lists = self._cf_get("/mods/featured", body={"gameId": CURSEFORGE_WOW_GAME_ID, "excludedModIds": []}) or {}
+        mods: dict[int, dict[str, Any]] = {}
+        for group in ("featured", "popular", "recentlyUpdated"):
+            for mod in lists.get(group) or []:
+                mods.setdefault(int(mod["id"]), mod)
+        self.cf_featured = {"fetched_at": time.time(), "mods": list(mods.values())}
+        return self.cf_featured["mods"]
+
+    def _cf_search(self, needle: str, flavor: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+        mods: list[dict[str, Any]] = []
+        if self.cf_search_allowed is not False:
+            try:
+                mods = self._cf_get("/mods/search", {
+                    "gameId": CURSEFORGE_WOW_GAME_ID, "searchFilter": needle, "sortField": 2, "sortOrder": "desc", "pageSize": 40,
+                }) or []
+                self.cf_search_allowed = True
+            except CurseForgeKeyError:
+                decky.logger.info("This CurseForge key can't search; matching featured lists instead")
+                self.cf_search_allowed = False
+        if self.cf_search_allowed is False:
+            mods = [mod for mod in self._cf_featured_mods() if needle in f"{mod.get('name', '')} {mod.get('summary', '')}".lower()]
+        type_id = curseforge_type_for(flavor["product"], flavor["version"]) if flavor else None
+        results: list[dict[str, Any]] = []
+        for mod in mods:
+            indexes = mod.get("latestFilesIndexes") or []
+            listed = sorted({str(index.get("gameVersion") or "") for index in indexes if index.get("gameVersion")}, key=version_sort_key, reverse=True)
+            pick = curseforge_pick(indexes, type_id, flavor["version"]) if flavor else None
+            results.append({
+                "id": f"cf:{mod['id']}", "name": str(mod.get("name") or ""), "source": "curseforge",
+                "summary": str(mod.get("summary") or ""),
+                "version": pick["version"] if pick else None, "downloads": int(mod.get("downloadCount") or 0),
+                "compatible": (pick is not None) if flavor else None, "known": False,
+                "listed_for": listed[:4],
+                "updated": self._parse_date(mod.get("dateModified")),
+                # Authors can opt out of third-party downloads; the API then gives no download URL.
+                "distributable": mod.get("allowModDistribution") is not False,
+            })
+        return results
+
+    def _cf_file_url(self, latest: dict[str, Any], mod_id: str, file_id: int) -> Optional[str]:
+        """
+        Download URL of one CurseForge file, kept with the release cache. None
+        means the file has no download URL (the author opted out); a failed
+        lookup raises instead and isn't cached, so it is retried next time.
+        """
+        files: dict[int, Optional[str]] = latest.setdefault("files", {})
+        if file_id not in files:
+            file = self._cf_get(f"/mods/{int(mod_id)}/files/{int(file_id)}") or {}
+            url = file.get("downloadUrl")
+            files[file_id] = urllib.parse.quote(str(url), safe=":/?&=%#+") if url else None   # names can contain spaces
+        return files[file_id]
+
+    async def add_curseforge_addon(self, mod_id: str) -> dict[str, Any]:
+        """Remember a CurseForge project so it appears in the list; installing is a separate step."""
+        mod = await asyncio.to_thread(self._cf_get, f"/mods/{int(mod_id)}")
+        if not mod:
+            raise RuntimeError("That CurseForge addon was not found")
+        if mod.get("allowModDistribution") is False:
+            raise RuntimeError(f"The author of {mod.get('name')} only allows downloads through the CurseForge app")
+        known: dict[str, Any] = dict(self.settings.get("curseforge_addons", {}))
+        known[str(mod["id"])] = {"name": str(mod.get("name") or ""), "author": self._cf_author(mod)}
+        self.settings["curseforge_addons"] = known
+        self._save_settings()
+        return {"id": f"cf:{mod['id']}", "name": known[str(mod["id"])]["name"]}
 
     def _all_addons(self) -> list[dict[str, Any]]:
         return list(ADDON_CATALOG) + self._extra_addons()
@@ -874,9 +1107,9 @@ class Plugin:
 
     def _search_sync(self, query: str, flavor_dir: Optional[str]) -> list[dict[str, Any]]:
         """
-        Search the shipped catalog, the user's extras and WoWInterface by name.
-        Catalog matches come first; WoWInterface results are ranked by downloads
-        and deduplicated against catalog names so the same addon is not offered twice.
+        Search the shipped catalog, the user's extras, WoWInterface and (with a
+        key) CurseForge by name. Catalog matches come first; WoWInterface
+        results are deduplicated against catalog names.
         """
         needle = query.strip().lower()
         if len(needle) < 2:
@@ -910,7 +1143,17 @@ class Plugin:
                 "listed_for": [str(item.get("version")) for item in (entry.get("UICompatibility") or [])][:4],
                 "updated": int(entry.get("UIDate") or 0) // 1000 or None,
             })
-        return results[:50]
+        results = results[:50]
+        if self._cf_key():
+            # Capped separately (40 per page) so a broad query can't push CurseForge
+            # out. Not deduplicated by name: the same addon on CurseForge often has
+            # builds or flavours the others lack, and rows show their source.
+            known_ids = {result["id"] for result in results}
+            try:
+                results += [result for result in self._cf_search(needle, flavor) if result["id"] not in known_ids]
+            except Exception as error:
+                decky.logger.info("CurseForge search failed: %s", error)
+        return results
 
     async def search_addons(self, query: str, flavor_dir: Optional[str] = None) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._search_sync, query, flavor_dir)
@@ -1038,6 +1281,10 @@ class Plugin:
             known = dict(self.settings.get("wowi_addons", {}))
             known.pop(addon_id.split(":", 1)[1], None)
             self.settings["wowi_addons"] = known
+        if addon_id.startswith("cf:"):
+            known = dict(self.settings.get("curseforge_addons", {}))
+            known.pop(addon_id.split(":", 1)[1], None)
+            self.settings["curseforge_addons"] = known
         self.addon_cache.pop(addon_id, None)
         self._save_settings()
 
@@ -1083,6 +1330,20 @@ class Plugin:
             except Exception:
                 pass
             data = {"releases": [{"version": str(detail.get("UIVersion") or ""), "url": detail.get("UIDownload"), "compat": compat}]}
+        elif addon["source"] == "curseforge":
+            # The mod's latestFilesIndexes names the newest file per game version
+            # and release type. The files endpoint isn't used: busy projects
+            # (WeakAuras) fill its first pages with alpha builds.
+            mod = self._cf_get(f"/mods/{int(addon['mod_id'])}") or {}
+            if mod.get("allowModDistribution") is False:
+                raise RuntimeError(f"The author of {addon['name']} only allows downloads through the CurseForge app")
+            indexes = mod.get("latestFilesIndexes") or []
+            newest = curseforge_newest(indexes)
+            if not newest:
+                raise RuntimeError(f"{addon['name']} has no published files")
+            # "releases" carries the newest version for display; per-flavour picks
+            # come from the indexes, and "files" caches download URLs by file id.
+            data = {"releases": [{"version": newest["version"]}], "indexes": indexes, "files": {}}
         else:
             raise RuntimeError(f"Unknown addon source {addon['source']}")
         self.addon_cache[addon["id"]] = {"fetched_at": time.time(), "data": data}
@@ -1090,6 +1351,15 @@ class Plugin:
 
     def _addon_download_for(self, addon: dict[str, Any], latest: dict[str, Any], flavor: dict[str, Any]) -> Optional[tuple[str, str]]:
         """(zip url, version) of the newest release that fits a flavour, or None."""
+        if addon["source"] == "curseforge":
+            # Matched by CurseForge's version type for the flavour; the package's
+            # TOCs are still checked after unpacking.
+            version = str(flavor.get("version") or "")
+            pick = curseforge_pick(latest.get("indexes") or [], curseforge_type_for(str(flavor.get("product") or ""), version), version)
+            if not pick:
+                return None
+            url = self._cf_file_url(latest, addon["mod_id"], pick["file_id"])
+            return (url, pick["version"]) if url else None
         for release in latest["releases"]:
             if addon["source"] == "github":
                 if release["manifest"] is None:
@@ -1127,7 +1397,12 @@ class Plugin:
             decky.logger.info("Addon lookup failed for %s: %s", addon["name"], error)
         for flavor in flavors:
             installed = flavor["installed"].get(addon["id"])
-            download = self._addon_download_for(addon, latest, flavor) if latest else None
+            try:
+                download = self._addon_download_for(addon, latest, flavor) if latest else None
+            except Exception as error:   # a lookup failed; that isn't the same as "no build for this flavour"
+                download = None
+                row["error"] = row["error"] or str(error)[:200]
+                decky.logger.info("Download lookup failed for %s in %s: %s", addon["name"], flavor["dir"], error)
             fits_version = download[1] if download else None
             row["flavors"][flavor["dir"]] = {
                 "supported": download is not None,
@@ -1145,7 +1420,7 @@ class Plugin:
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             rows = list(pool.map(lambda addon: self._addon_row(addon, wow["flavors"], refresh), self._all_addons()))
         unmanaged = {flavor["dir"]: self._scan_unmanaged(flavor) for flavor in wow["flavors"]}
-        return {"wow": wow, "addons": rows, "unmanaged": unmanaged, "game_running": self._wow_running()}
+        return {"wow": wow, "addons": rows, "unmanaged": unmanaged, "game_running": self._wow_running(), "curseforge": bool(self._cf_key())}
 
     async def list_addons(self, refresh: bool = False) -> dict[str, Any]:
         """Catalog with per-flavour status. `refresh` bypasses the release cache."""
@@ -1169,20 +1444,31 @@ class Plugin:
         addons_dir = flavor["addons_dir"]
         os.makedirs(addons_dir, exist_ok=True)
 
+        progress = {"id": addon_id, "flavor": flavor_dir, "stage": "downloading", "received": 0, "total": 0}
+        self.addon_progress = progress
+
+        def on_progress(received: int, total: int) -> None:
+            progress.update(received=received, total=total)
+
         with tempfile.TemporaryDirectory(prefix="frostdeck-addon-") as workdir:
             archive = os.path.join(workdir, "addon.zip")
-            with open(archive, "wb") as handle:
-                handle.write(self._http_get(url, timeout=300))
+            self._download_file(url, archive, on_progress)
+            progress["stage"] = "installing"
             staging = os.path.join(workdir, "unpacked")
             folders: set[str] = set()
             with zipfile.ZipFile(archive) as bundle:
                 for member in bundle.infolist():
                     name = member.filename.replace("\\", "/")
-                    if not name or name.startswith("/") or ".." in name.split("/"):
+                    if name.startswith("/") or ".." in name.split("/"):
                         continue
-                    top = name.split("/", 1)[0]
-                    if "/" not in name and not member.is_dir():
+                    # "./Foo/x.lua" is "Foo/x.lua": empty and "." parts are dropped (zipfile.extract
+                    # does the same), so "." can never become a folder name that gets deleted below.
+                    parts = [part for part in name.split("/") if part not in ("", ".")]
+                    if not parts or (len(parts) == 1 and not member.is_dir()):
                         continue   # stray file at the root of the zip; addons are folders
+                    top = parts[0]
+                    if top.startswith(".") or ":" in top or top == "__MACOSX":
+                        continue   # hidden folders, drive letters, macOS zip metadata
                     folders.add(top)
                     bundle.extract(member, staging)
             if not folders:
@@ -1209,9 +1495,20 @@ class Plugin:
         decky.logger.info("Installed %s %s into %s (%s), fits=%s", addon["name"], version, flavor_dir, ", ".join(sorted(folders)), fits)
         return {"version": version, "folders": sorted(folders), "fits": fits}
 
+    # The install in progress, for the UI's progress bar:
+    # {"id", "flavor", "stage": "downloading" | "installing", "received", "total"} or None.
+    addon_progress: Optional[dict[str, Any]] = None
+
     async def install_addon(self, addon_id: str, flavor_dir: str) -> dict[str, Any]:
         """Download and unpack an addon into one flavour; also used for updates."""
-        return await asyncio.to_thread(self._install_addon_sync, addon_id, flavor_dir)
+        try:
+            return await asyncio.to_thread(self._install_addon_sync, addon_id, flavor_dir)
+        finally:
+            self.addon_progress = None
+
+    async def addon_install_progress(self) -> Optional[dict[str, Any]]:
+        """Progress of the addon install running now, polled by the UI; None when idle."""
+        return dict(self.addon_progress) if self.addon_progress else None
 
     async def remove_addon(self, addon_id: str, flavor_dir: str) -> None:
         if self._wow_running():
@@ -1282,6 +1579,8 @@ class Plugin:
         if not addon and addon_id.startswith("wowi:"):
             entry = self._wowi_entries().get(addon_id.split(":", 1)[1], {})
             addon = wowi_addon_entry(addon_id.split(":", 1)[1], str(entry.get("UIName", "")), str(entry.get("UIAuthorName", "")))
+        if not addon and addon_id.startswith("cf:"):
+            addon = self._cf_entry(addon_id.split(":", 1)[1])
         if not addon:
             raise RuntimeError("Unknown addon")
         data: dict[str, Any] = {"id": addon_id, "name": addon["name"], "source": addon["source"], "author": "", "version": "", "updated": None,
@@ -1322,6 +1621,35 @@ class Plugin:
                 "author": str(info.get("author") or ""), "version": str(info.get("version") or ""),
                 "updated": self._parse_date(info.get("last_update")),
                 "url": str(info.get("web_url") or "https://tukui.org/elvui"),
+            })
+        elif addon["source"] == "curseforge":
+            mod_id = int(addon["mod_id"])
+            mod = self._cf_get(f"/mods/{mod_id}") or {}
+            try:
+                description = str(self._cf_get(f"/mods/{mod_id}/description") or "")
+            except Exception:
+                description = ""
+            indexes = mod.get("latestFilesIndexes") or []
+            newest = curseforge_newest(indexes) or {}
+            changes = ""
+            if newest.get("file_id"):
+                try:
+                    changes = str(self._cf_get(f"/mods/{mod_id}/files/{newest['file_id']}/changelog") or "")
+                except Exception:
+                    pass
+            screenshots = [str(shot.get("url")) for shot in mod.get("screenshots") or [] if shot.get("url")]
+            distributable = mod.get("allowModDistribution") is not False
+            data.update({
+                "author": self._cf_author(mod),
+                "version": str(newest.get("version") or ""),
+                "updated": self._parse_date(mod.get("dateModified")),
+                "downloads": int(mod.get("downloadCount") or 0) or None,
+                "description": (str(mod.get("summary") or "") + "\n\n" + self._plain_text(description, 1000)).strip()
+                               + ("" if distributable else "\n\nThe author only allows downloads through the CurseForge app, so FrostDeck can't install it."),
+                "changes": self._plain_text(changes, 600),
+                "url": str((mod.get("links") or {}).get("websiteUrl") or ""),
+                "images": (screenshots + self._extract_images(description))[:6],
+                "distributable": distributable,
             })
         self.details_cache[addon_id] = {"fetched_at": time.time(), "data": data}
         return data

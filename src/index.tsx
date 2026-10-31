@@ -25,6 +25,7 @@ import {
   addonUpdateSummary,
   gameInstallInfo,
   getState,
+  setCurseforgeApiKey,
   setSgdbApiKey,
   uninstallGame,
   updateAddons,
@@ -503,6 +504,95 @@ function WowSection(props: { state: PluginState; refresh: () => Promise<void> })
 
 // ---------------------------------------------------------------- Settings
 
+const CURSEFORGE_CONSOLE_URL = "https://console.curseforge.com/";
+
+/** CurseForge API key: optional, adds CurseForge to addon search. Checked with CurseForge before saving. */
+function CurseforgeKeyRows(props: { state: PluginState; refresh: () => Promise<void> }) {
+  const { state, refresh } = props;
+  const [busy, run] = useBusy();
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState(false);
+  const source = state.curseforge_key_source;
+  const showField = source !== "user" || editing;
+
+  const save = (key: string | null) =>
+    run(async () => {
+      try {
+        await setCurseforgeApiKey(key);
+        setDraft("");
+        setEditing(false);
+        toaster.toast({ title: "FrostDeck", body: key ? "CurseForge key saved. CurseForge is now in addon search." : "CurseForge key cleared." });
+      } catch (caught) {
+        toaster.toast({ title: "CurseForge", body: errorText(caught) });
+      }
+      await refresh();
+    });
+
+  const help =
+    source === "bundled"
+      ? "CurseForge is already included in addon search. To use your own key instead, get one below and paste it here."
+      : "Optional. Adds CurseForge's addons to search. Get a key below, copy it, and paste it here.";
+
+  return (
+    <>
+      {showField ? (
+        <PanelSectionRow>
+          <Field label="CurseForge API key" description={help} childrenLayout="below">
+            <TextField value={draft} bIsPassword onChange={(event) => setDraft(event.target.value)} />
+          </Field>
+        </PanelSectionRow>
+      ) : (
+        <PanelSectionRow>
+          <Field label="CurseForge" description="On, using your API key." childrenContainerWidth="min">
+            <DialogButton style={{ minWidth: "110px", padding: "10px 14px" }} disabled={busy} onClick={() => setEditing(true)}>
+              Change key
+            </DialogButton>
+          </Field>
+        </PanelSectionRow>
+      )}
+      {showField && draft.trim().length > 0 && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy} onClick={() => save(draft.trim())}>
+            Save CurseForge key
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      {showField && draft.trim().length === 0 && (
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            description="Opens the CurseForge developer console in Steam's browser. Sign in, open API keys, and copy your key."
+            onClick={() => Navigation.NavigateToExternalWeb(CURSEFORGE_CONSOLE_URL)}
+          >
+            Get a CurseForge key
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      {editing && source === "user" && (
+        <>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy} onClick={() => save(null)}>
+              Remove CurseForge key
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy}
+              onClick={() => {
+                setDraft("");
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
+      )}
+    </>
+  );
+}
+
 function SettingsSection(props: { state: PluginState; refresh: () => Promise<void> }) {
   const { state, refresh } = props;
   const [busy, run] = useBusy();
@@ -599,6 +689,7 @@ function SettingsSection(props: { state: PluginState; refresh: () => Promise<voi
           </ButtonItem>
         </PanelSectionRow>
       )}
+      <CurseforgeKeyRows state={state} refresh={refresh} />
       <PanelSectionRow>
         <ButtonItem layout="below" disabled={busy} description="Removes what the plugin created. Asks before touching anything." onClick={onReset}>
           Reset FrostDeck

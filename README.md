@@ -23,7 +23,7 @@ Getting Battle.net onto a Deck used to mean Desktop Mode, a tutorial, and a lot 
 - **Battle.net in one tap.** Downloads Blizzard's official installer, runs it under Proton, adds a *Battle.net* shortcut to a *Blizzard* collection in your library, and opens it so you can sign in.
 - **Games launch from Steam.** Every game you install inside Battle.net is detected and added as its own shortcut. Press Play and the game starts, with Steam Input, the overlay, and suspend and resume all working because Steam owns the process.
 - **Artwork included.** Capsule, hero, logo, header and icon are applied automatically from SteamGridDB, with Valve's own art as a fallback for titles also sold on Steam.
-- **WoW addons from the couch.** Detects each installed flavour (Retail, Classic, Classic Era, Forever), installs and updates addons from GitHub, WoWInterface and Tukui, and puts [ConsolePort](https://github.com/seblindfors/ConsolePort) controller support one tap away.
+- **WoW addons from the couch.** Detects each installed flavour (Retail, Classic, Classic Era, Forever), installs and updates addons from GitHub, WoWInterface, Tukui and CurseForge, and puts [ConsolePort](https://github.com/seblindfors/ConsolePort) controller support one tap away.
 - **Clean removal.** Uninstall a game, remove just its shortcut, or reset everything. Uninstalling the plugin leaves your games and shortcuts intact.
 
 ## Installation
@@ -46,7 +46,7 @@ You need a Battle.net account. A free [SteamGridDB API key](https://www.steamgri
 **World of Warcraft.** Once WoW is installed, a **World of Warcraft** section shows each flavour with its addon count. **Addons** opens the manager:
 
 - *Installed* shows what's in that flavour's AddOns folder, with Update buttons where a newer version exists and **Update all** at the top. Addons you copied in by hand are listed too, and known ones can be managed from here.
-- *Browse* has a search box across the catalog and WoWInterface, with **Recommended for Steam Deck** and **Popular** beneath it. Press a name for details, screenshots and recent changes; press **Install** to install.
+- *Browse* has a search box across the catalog, WoWInterface and (with a key) CurseForge, with **Recommended for Steam Deck** and **Popular** beneath it. Press a name for details, screenshots and recent changes; press **Install** to install.
 - Addons on GitHub that aren't listed can be added by repo name with **Add repo**.
 
 **Settings.** Proton build (shared by every shortcut, pinned so Battle.net stays stable), artwork key, repair, and reset.
@@ -56,7 +56,7 @@ You need a Battle.net account. A free [SteamGridDB API key](https://www.steamgri
 - **Quit games from inside the game.** Blizzard games save settings on a clean exit. Steam's *Exit Game* ends the process immediately and WoW loses what it hadn't written.
 - **One Proton build for everything.** Switching builds mid-stream is the most common way Battle.net installs break. Change it from FrostDeck's dropdown so all shortcuts move together, and switch back if Battle.net complains.
 - **Call of Duty titles don't run.** Their anti-cheat has no Linux support. Cloud streaming or a Windows install are the alternatives.
-- **CurseForge-only addons aren't available**, including Retail WeakAuras. Sources are limited to ones with deterministic packages and no author opt-outs. See [Addon sources](#addon-sources).
+- **CurseForge needs an API key.** Add one under Settings → *CurseForge API key* (from [console.curseforge.com](https://console.curseforge.com)) and CurseForge joins the search. Projects whose authors only allow downloads through the CurseForge app are listed but marked *CurseForge app only*. See [Addon sources](#addon-sources).
 
 ## How it works
 
@@ -71,7 +71,7 @@ Addons are plain folders under `<flavour>/Interface/AddOns`. FrostDeck reads the
 | GitHub releases (BigWigs packager manifests) | No | Most major addons: ConsolePort, DBM, BigWigs, Plater, Bartender4, … |
 | WoWInterface | No | About 8,000 addons, searchable |
 | Tukui | No | ElvUI |
-| CurseForge | Not supported yet | Long tail; many authors opt out of third-party clients |
+| CurseForge | Yes (Settings) | The long tail of addons; author opt-outs are respected |
 
 ## Troubleshooting
 

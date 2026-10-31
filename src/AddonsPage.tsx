@@ -4,9 +4,11 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react
 import { FaEllipsisH, FaSyncAlt } from "react-icons/fa";
 
 import {
+  addCurseforgeAddon,
   addCustomAddon,
   addWowiAddon,
   addonDetails,
+  addonInstallProgress,
   adoptAddon,
   installAddon,
   listAddons,
@@ -15,6 +17,7 @@ import {
   searchAddons,
   updateAddons,
   type AddonDetails,
+  type AddonInstallProgress,
   type AddonListing,
   type AddonRow,
   type AddonSearchResult,
@@ -31,13 +34,13 @@ export function requestAddonsFlavor(dir: string | null): void {
 }
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const SOURCE_LABEL: Record<string, string> = { github: "GitHub", tukui: "Tukui", wowi: "WoWInterface" };
+const SOURCE_LABEL: Record<string, string> = { github: "GitHub", tukui: "Tukui", wowi: "WoWInterface", curseforge: "CurseForge" };
 const compact = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 const shortVersion = (version: string): string => version.split(".").slice(0, 3).join(".");
 const dateText = (epoch: number | null | undefined): string => (epoch ? new Date(epoch * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
 
 type SortKey = "downloads" | "updated" | "name";
-type SourceFilter = "all" | "github" | "wowi";
+type SourceFilter = "all" | "github" | "wowi" | "curseforge";
 const SORT_OPTIONS: Array<{ data: SortKey; label: string }> = [
   { data: "downloads", label: "Most downloaded" },
   { data: "updated", label: "Recently updated" },
@@ -47,6 +50,7 @@ const SOURCE_OPTIONS: Array<{ data: SourceFilter; label: string }> = [
   { data: "all", label: "All sources" },
   { data: "github", label: "GitHub" },
   { data: "wowi", label: "WoWInterface" },
+  { data: "curseforge", label: "CurseForge" },
 ];
 
 /** Prefer Retail when several flavours are installed. */
@@ -101,6 +105,45 @@ function Button(props: { label: ReactNode; onClick: (event: MouseEvent) => void;
     >
       {label}
     </DialogButton>
+  );
+}
+
+const megabytes = (bytes: number): string => `${(bytes / 1_000_000).toFixed(bytes >= 10_000_000 ? 0 : 1)} MB`;
+
+/**
+ * Takes the place of a row's buttons while that addon installs. Shows a
+ * percentage when the server reports a size, bytes so far when it doesn't,
+ * then "Installing…" while the package is checked and unpacked.
+ */
+function InstallProgress(props: { progress: AddonInstallProgress | null }) {
+  const { progress } = props;
+  let label = "Starting…";
+  let fraction: number | null = null;
+  if (progress?.stage === "installing") {
+    label = "Installing…";
+    fraction = 1;
+  } else if (progress && progress.total > 0) {
+    fraction = Math.min(progress.received / progress.total, 1);
+    label = `Downloading ${Math.round(fraction * 100)}%`;
+  } else if (progress && progress.received > 0) {
+    label = `Downloading ${megabytes(progress.received)}`;
+  }
+  return (
+    <div style={{ width: "170px", flexShrink: 0, alignSelf: "center" }}>
+      <div style={{ fontSize: "12px", opacity: 0.8, marginBottom: "5px", ...oneLine }}>{label}</div>
+      <div style={{ height: "6px", borderRadius: "3px", background: "rgba(255, 255, 255, 0.12)", overflow: "hidden" }}>
+        <div
+          style={{
+            height: "100%",
+            width: fraction === null ? "100%" : `${Math.round(fraction * 100)}%`,
+            borderRadius: "3px",
+            background: "#1a9fff",
+            opacity: fraction === null ? 0.35 : 1,
+            transition: "width 0.25s linear",
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -163,6 +206,38 @@ export function AddonsPage() {
   const gameRunning = !!listing?.game_running;
   const locked = busyId !== null || gameRunning;
 
+  // Install progress: polled while a single install or "Update all" runs.
+  const [installingId, setInstallingId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<AddonInstallProgress | null>(null);
+  const tracking = installingId !== null || busyId === "__all__";
+  useEffect(() => {
+    if (!tracking) {
+      setProgress(null);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const next = await addonInstallProgress();
+        if (alive) {
+          setProgress(next);
+        }
+      } catch {
+        // A missed poll just leaves the last value on screen.
+      }
+    };
+    void tick();
+    const timer = setInterval(tick, 300);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [tracking]);
+  /** The addon whose row shows a progress bar: the backend's current install, or the one just started. */
+  const progressId = tracking ? (progress?.id ?? installingId) : null;
+  const progressFor = (id: string) =>
+    progressId === id ? <InstallProgress progress={progress?.id === id ? progress : null} /> : null;
+
   // Search as the user types, a short pause after the last keystroke.
   useEffect(() => {
     const term = query.trim();
@@ -216,7 +291,13 @@ export function AddonsPage() {
     if (!flavor) {
       throw new Error("No flavour selected");
     }
-    const result = await installAddon(id, flavor.dir);
+    setInstallingId(id);
+    let result;
+    try {
+      result = await installAddon(id, flavor.dir);
+    } finally {
+      setInstallingId(null);
+    }
     const note = result.fits === null ? " It doesn't declare supported versions; check it loads in the AddOns menu." : "";
     return `Installed ${result.version} for ${flavor.label}.${note}`;
   };
@@ -228,6 +309,9 @@ export function AddonsPage() {
       withToast(result.name, async () => {
         if (result.source === "wowi" && !result.known) {
           await addWowiAddon(result.id.split(":")[1]);
+        }
+        if (result.source === "curseforge" && !result.known) {
+          await addCurseforgeAddon(result.id.split(":")[1]);
         }
         return installById(result.id);
       }),
@@ -285,7 +369,13 @@ export function AddonsPage() {
       }),
     );
 
-  const openDetails = (id: string, name: string, installable: boolean) => async () => {
+  /**
+   * Details sheet. `onInstallPress` is the same action as the row's Install
+   * button (search results first register the addon with the backend); when
+   * it's absent the sheet has no Install button.
+   */
+  const openDetails = (id: string, name: string, onInstallPress?: () => void) => async () => {
+    const installable = onInstallPress !== undefined;
     let details: AddonDetails;
     try {
       details = await addonDetails(id);
@@ -327,11 +417,7 @@ export function AddonsPage() {
         strMiddleButtonText={details.url ? "View page" : undefined}
         strCancelButtonText={installable ? "Close" : undefined}
         bAlertDialog={!installable && !details.url}
-        onOK={() => {
-          if (installable) {
-            void onInstall(id, name);
-          }
-        }}
+        onOK={() => onInstallPress?.()}
         onMiddleButton={() => {
           if (details.url) {
             Navigation.NavigateToExternalWeb(details.url);
@@ -406,9 +492,13 @@ export function AddonsPage() {
       {[...updates, ...current].map((addon) => {
         const status = statusOf(addon);
         return (
-          <Row key={addon.id} title={addon.name} subtitle={subtitleFor(addon)} highlight={!!status?.update_available} onOpen={openDetails(addon.id, addon.name, false)}>
-            {status?.update_available && <Button label="Update" disabled={locked} onClick={() => onInstall(addon.id, addon.name)} />}
-            <Button narrow label={<FaEllipsisH />} disabled={locked} onClick={openMenu(addon, status)} />
+          <Row key={addon.id} title={addon.name} subtitle={subtitleFor(addon)} highlight={!!status?.update_available} onOpen={openDetails(addon.id, addon.name)}>
+            {progressFor(addon.id) ?? (
+              <>
+                {status?.update_available && <Button label="Update" disabled={locked} onClick={() => onInstall(addon.id, addon.name)} />}
+                <Button narrow label={<FaEllipsisH />} disabled={locked} onClick={openMenu(addon, status)} />
+              </>
+            )}
           </Row>
         );
       })}
@@ -442,9 +532,24 @@ export function AddonsPage() {
       parts.push(dateText(result.updated));
     }
     const already = isInstalled(result.id);
+    const blocked = result.distributable === false;
+    // CurseForge's per-version file index is reliable; WoWInterface's compatibility list lags, so it isn't used to block.
+    const wrongVersion = result.source === "curseforge" && result.compatible === false;
     return (
-      <Row key={result.id} title={result.name} subtitle={parts.join(" · ")} onOpen={openDetails(result.id, result.name, !already && !locked)}>
-        <Button label={already ? "Installed" : "Install"} disabled={locked || already} onClick={() => onInstallResult(result)} />
+      <Row
+        key={result.id}
+        title={result.name}
+        subtitle={parts.join(" · ")}
+        onOpen={openDetails(result.id, result.name, !already && !blocked && !wrongVersion && !locked ? () => void onInstallResult(result) : undefined)}
+      >
+        {progressFor(result.id) ??
+          (blocked && !already ? (
+          <Muted>CurseForge app only</Muted>
+        ) : wrongVersion && !already ? (
+          <Muted>Not for {flavor?.label ?? "this version"}</Muted>
+        ) : (
+          <Button label={already ? "Installed" : "Install"} disabled={locked || already} onClick={() => onInstallResult(result)} />
+        ))}
       </Row>
     );
   };
@@ -470,12 +575,13 @@ export function AddonsPage() {
     const already = !!status?.installed_version;
     const unsupported = !addon.error && !status?.supported;
     return (
-      <Row key={addon.id} title={addon.name} subtitle={addon.summary} highlight={highlight} onOpen={openDetails(addon.id, addon.name, !already && !unsupported && !locked)}>
-        {unsupported ? (
-          <Muted>Not for {flavor?.label}</Muted>
-        ) : (
-          <Button label={already ? "Installed" : "Install"} disabled={locked || already} onClick={() => onInstall(addon.id, addon.name)} />
-        )}
+      <Row key={addon.id} title={addon.name} subtitle={addon.summary} highlight={highlight} onOpen={openDetails(addon.id, addon.name, !already && !unsupported && !locked ? () => void onInstall(addon.id, addon.name) : undefined)}>
+        {progressFor(addon.id) ??
+          (unsupported ? (
+            <Muted>Not for {flavor?.label}</Muted>
+          ) : (
+            <Button label={already ? "Installed" : "Install"} disabled={locked || already} onClick={() => onInstall(addon.id, addon.name)} />
+          ))}
       </Row>
     );
   };
@@ -490,7 +596,13 @@ export function AddonsPage() {
       </Focusable>
       <Focusable style={{ display: "flex", alignItems: "center", gap: "10px", margin: "0 2px 8px" }}>
         <div style={{ flex: 1, fontSize: "12px", opacity: 0.55 }}>
-          {searching ? "Searching…" : visibleResults ? `${visibleResults.length} result${visibleResults.length === 1 ? "" : "s"}` : "Search the catalog and WoWInterface by name"}
+          {searching
+            ? "Searching…"
+            : visibleResults
+              ? `${visibleResults.length} result${visibleResults.length === 1 ? "" : "s"}`
+              : listing?.curseforge
+                ? "Search the catalog, WoWInterface and CurseForge by name"
+                : "Search the catalog and WoWInterface by name"}
         </div>
         {results && (
           <>
@@ -506,7 +618,11 @@ export function AddonsPage() {
 
       {visibleResults ? (
         visibleResults.length === 0 && !searching ? (
-          <div style={{ opacity: 0.7, padding: "12px 2px" }}>Nothing matched. Addons published only on CurseForge aren't available here.</div>
+          <div style={{ opacity: 0.7, padding: "12px 2px" }}>
+            {listing?.curseforge
+              ? "Nothing matched."
+              : "Nothing matched. To search CurseForge too, add a CurseForge API key in FrostDeck's Settings."}
+          </div>
         ) : (
           visibleResults.map(resultRow)
         )
