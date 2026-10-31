@@ -55,3 +55,8 @@ out/*
 cli/
 cli/*
 cli/decky
+
+# CurseForge keys: ./curseforge.key is a personal key deploy.sh sends to your own Deck;
+# defaults/curseforge.key is an approved project key for release builds.
+curseforge.key
+defaults/curseforge.key
