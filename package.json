@@ -1,6 +1,6 @@
 {
   "name": "frostdeck",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Decky plugin for Steam Deck: install Battle.net, launch Blizzard games from Steam, and manage World of Warcraft addons from Gaming Mode.",
   "type": "module",
   "scripts": {
