@@ -23,13 +23,28 @@ else
   npx -y pnpm@9 run build
 fi
 
+# Assemble what the Deck gets in a local folder first.
+LOCAL_STAGE="$(mktemp -d)"
+trap 'rm -rf "${LOCAL_STAGE}"' EXIT
+cp -R dist py_modules defaults assets main.py plugin.json package.json LICENSE README.md "${LOCAL_STAGE}/"
+find "${LOCAL_STAGE}" -name '__pycache__' -prune -exec rm -rf {} +
+# A personal CurseForge key in ./curseforge.key (gitignored) goes to your own Deck
+# only. It is kept out of defaults/ because Decky's zip packaging copies that
+# folder, which would put the key in a release build.
+if [ -f curseforge.key ]; then
+  cp curseforge.key "${LOCAL_STAGE}/defaults/curseforge.key"
+  echo "Including your CurseForge key from ./curseforge.key"
+fi
+
 echo "Syncing to ${DECK_HOST}:${STAGE_DIR}"
-ssh "${DECK_HOST}" "mkdir -p '${STAGE_DIR}'"
-rsync -az --delete \
-  --include='dist/***' --include='py_modules/***' --include='defaults/***' --include='assets/***' \
-  --include='main.py' --include='plugin.json' --include='package.json' --include='LICENSE' --include='README.md' \
-  --exclude='*' \
-  ./ "${DECK_HOST}:${STAGE_DIR}/"
+if command -v rsync >/dev/null 2>&1; then
+  ssh "${DECK_HOST}" "mkdir -p '${STAGE_DIR}'"
+  rsync -az --delete "${LOCAL_STAGE}/" "${DECK_HOST}:${STAGE_DIR}/"
+else
+  # No rsync (Git Bash on Windows): stream a tarball over ssh into a fresh staging folder.
+  tar -czf - -C "${LOCAL_STAGE}" . \
+    | ssh "${DECK_HOST}" "rm -rf '${STAGE_DIR}' && mkdir -p '${STAGE_DIR}' && tar -xzf - -C '${STAGE_DIR}'"
+fi
 
 echo "Installing into ${REMOTE_DIR} and restarting Decky (sudo password needed)"
 # Decky is stopped while files move so its plugin watcher cannot race the copy,

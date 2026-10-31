@@ -1,0 +1,4 @@
+# Everything ships to Linux (the Deck); keep Unix line endings on every OS.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

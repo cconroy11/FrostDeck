@@ -50,6 +50,8 @@ export interface PluginState {
   sgdb_api_key_set: boolean;
   sgdb_plugin_installed: boolean;
   artwork_applied: Record<string, boolean>;
+  /** Where the CurseForge key comes from; null when CurseForge is off. */
+  curseforge_key_source: "user" | "bundled" | null;
 }
 
 export interface DownloadStatus {
@@ -78,7 +80,8 @@ export const setGameAppId = callable<[launchCode: string, appId: number | null],
 export const resetBackend = callable<[deletePrefix: boolean], void>("reset");
 export const fetchArtwork = callable<[name: string, launchCode: string, steamAppId: number | null], Artwork>("fetch_artwork");
 export const setSgdbApiKey = callable<[key: string | null], void>("set_sgdb_api_key");
-export const setArtworkApplied = callable<[code: string, applied: boolean], void>("set_artwork_applied");
+export const setCurseforgeApiKey = callable<[key: string | null], { source: "user" | "bundled" | null }>("set_curseforge_api_key");
+export const setArtworkApplied =callable<[code: string, applied: boolean], void>("set_artwork_applied");
 export interface WowFlavor {
   dir: string;
   path: string;
@@ -109,7 +112,7 @@ export interface AddonRow {
   summary: string;
   category: string;
   featured: boolean;
-  source: "github" | "tukui" | "wowi";
+  source: "github" | "tukui" | "wowi" | "curseforge";
   latest_version: string | null;
   error: string | null;
   custom: boolean;
@@ -130,6 +133,7 @@ export interface AddonListing {
   addons: AddonRow[];
   unmanaged: Record<string, UnmanagedAddon[]>;
   game_running: boolean;
+  curseforge: boolean;
 }
 
 export interface AddonUpdateSummary {
@@ -144,12 +148,21 @@ export const updateAddons = callable<[flavorDir: string], { updated: string[]; f
 export const adoptAddon = callable<[addonId: string, flavorDir: string], void>("adopt_addon");
 export const addCustomAddon = callable<[repo: string], { id: string; name: string; version: string }>("add_custom_addon");
 export const removeCustomAddon = callable<[addonId: string], void>("remove_custom_addon");
-export const addonUpdateSummary = callable<[], AddonUpdateSummary>("addon_update_summary");
+export interface AddonInstallProgress {
+  id: string;
+  flavor: string;
+  stage: "downloading" | "installing";
+  received: number;
+  /** 0 when the server didn't report a size. */
+  total: number;
+}
+export const addonInstallProgress = callable<[], AddonInstallProgress | null>("addon_install_progress");
+export const addonUpdateSummary =callable<[], AddonUpdateSummary>("addon_update_summary");
 
 export interface AddonSearchResult {
   id: string;
   name: string;
-  source: "github" | "tukui" | "wowi";
+  source: "github" | "tukui" | "wowi" | "curseforge";
   summary: string;
   version: string | null;
   downloads: number | null;
@@ -157,11 +170,13 @@ export interface AddonSearchResult {
   known: boolean;
   listed_for?: string[];
   updated?: number | null;
+  /** CurseForge only: false when the author opted out of third-party downloads. */
+  distributable?: boolean;
 }
 export interface AddonDetails {
   id: string;
   name: string;
-  source: "github" | "tukui" | "wowi";
+  source: "github" | "tukui" | "wowi" | "curseforge";
   author: string;
   version: string;
   updated: number | null;
@@ -171,10 +186,12 @@ export interface AddonDetails {
   changes: string;
   url: string;
   images: string[];
+  distributable?: boolean;
 }
 export const addonDetails = callable<[addonId: string], AddonDetails>("addon_details");
 export const searchAddons = callable<[query: string, flavorDir: string | null], AddonSearchResult[]>("search_addons");
 export const addWowiAddon = callable<[uid: string], { id: string; name: string }>("add_wowi_addon");
+export const addCurseforgeAddon = callable<[modId: string], { id: string; name: string }>("add_curseforge_addon");
 
 export interface CompatToolInfo {
   name: string;

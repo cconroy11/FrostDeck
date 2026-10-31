@@ -8,6 +8,9 @@ comes from sources that publish deterministic packages:
   manifest naming a zip per game flavour (`mainline`, `mists`, `classic`,
   `forever`, ...), each with the interface version it targets.
 * The Tukui API, for ElvUI.
+* WoWInterface and CurseForge, searched by name. CurseForge needs an API key
+  and honours each author's choice: projects that opt out of third-party
+  downloads come back without a download URL and are shown but not installable.
 
 Which zip fits which installed flavour is decided by interface version: the
 installed client's version (from `.build.info`) is turned into an interface
@@ -23,10 +26,11 @@ class AddonEntry(TypedDict, total=False):
     id: str
     name: str
     summary: str
-    source: str        # "github" | "tukui" | "wowi"
+    source: str        # "github" | "tukui" | "wowi" | "curseforge"
     repo: str          # github: owner/name
     slug: str          # tukui: addon slug
     uid: str           # wowi: WoWInterface file id
+    mod_id: str        # curseforge: CurseForge project id
     featured: bool
     category: str
     folder: str        # main AddOns folder the package creates; used to adopt hand-installed copies
@@ -109,6 +113,88 @@ def wowi_compatible(compat: Optional[list[dict[str, Any]]], version: str) -> Opt
         except ValueError:
             continue
     return False
+
+
+def curseforge_addon_entry(mod_id: str, name: str, author: str = "") -> AddonEntry:
+    """Catalog entry for an addon installed from CurseForge (api.curseforge.com)."""
+    return {"id": f"cf:{mod_id}", "name": name, "source": "curseforge", "mod_id": str(mod_id), "category": "CurseForge",
+            "summary": f"By {author} on CurseForge" if author else "From CurseForge", "custom": True}
+
+
+def version_majors(versions: Optional[list[Any]]) -> set[int]:
+    """Major game versions from strings like "11.0.7" or "1.15.4"; labels such as "Retail" are ignored."""
+    majors: set[int] = set()
+    for value in versions or []:
+        match = re.match(r"\s*(\d+)\.\d+", str(value))
+        if match:
+            majors.add(int(match.group(1)))
+    return majors
+
+
+# CurseForge files are tagged with a "game version type" per WoW flavour. Era
+# (1.15) and Forever (1.60) share a major version, as do Wrath (3.4) and Titan
+# Reforged (3.80), so the type is what tells them apart.
+CURSEFORGE_TYPE_BY_PRODUCT: dict[str, int] = {"wow": 517, "wow_classic_era": 67408, "wow_forever": 88568, "wowf": 88568}
+CURSEFORGE_TYPE_BY_MAJOR: dict[int, int] = {1: 67408, 2: 73246, 3: 73713, 4: 77522, 5: 79434}
+
+
+def curseforge_type_for(product: str, version: str) -> Optional[int]:
+    """CurseForge gameVersionTypeId for an installed flavour, or None when unknown."""
+    if product in CURSEFORGE_TYPE_BY_PRODUCT:
+        return CURSEFORGE_TYPE_BY_PRODUCT[product]
+    match = re.match(r"(\d+)\.(\d+)", version or "")
+    if not match:
+        return None
+    major, minor = int(match.group(1)), int(match.group(2))
+    if major == 1 and minor >= 60:
+        return 88568
+    if major == 3 and minor >= 80:
+        return 81212
+    if major >= 6:
+        return 517
+    return CURSEFORGE_TYPE_BY_MAJOR.get(major)
+
+
+def curseforge_pick(indexes: list[dict[str, Any]], type_id: Optional[int], version: str) -> Optional[dict[str, Any]]:
+    """
+    From a mod's `latestFilesIndexes`, the newest stable file for a flavour,
+    else the newest beta; alphas are never picked. Matches on version type and
+    on major version: Retail builds for 11.x are still typed "Retail" but don't
+    load in 12.x, so both must agree.
+    """
+    try:
+        major = int(version.split(".")[0])
+    except (ValueError, IndexError):
+        major = None
+    candidates = []
+    for index in indexes or []:
+        if index.get("releaseType") not in (1, 2) or not index.get("fileId"):
+            continue
+        if type_id is not None and index.get("gameVersionTypeId") != type_id:
+            continue
+        if major is not None and major not in version_majors([index.get("gameVersion")]):
+            continue
+        candidates.append(index)
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda index: (index["releaseType"] != 1, -int(index["fileId"])))
+    return {"file_id": int(best["fileId"]), "version": curseforge_file_version(str(best.get("filename") or best["fileId"])),
+            "beta": best["releaseType"] != 1}
+
+
+def curseforge_newest(indexes: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The version to show when no flavour is in play: newest Retail file, else newest of any flavour."""
+    return curseforge_pick(indexes, CURSEFORGE_TYPE_BY_PRODUCT["wow"], "") or curseforge_pick(indexes, None, "")
+
+
+def version_sort_key(version: str) -> tuple[int, ...]:
+    """'11.2.7' -> (11, 2, 7), so '3.80.2' sorts after '3.4.5'."""
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def curseforge_file_version(filename: str) -> str:
+    """'WeakAuras-5.22.1.zip' -> 'WeakAuras-5.22.1'; the version FrostDeck records and compares."""
+    return re.sub(r"\.zip$", "", filename, flags=re.I)
 
 
 def custom_addon_entry(repo: str) -> AddonEntry:
