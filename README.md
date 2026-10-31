@@ -35,7 +35,11 @@ FrostDeck is not in the Decky store yet. Until it is:
 3. On the Deck, open the Quick Access menu → Decky → Settings (gear) → General → enable **Developer Mode**. A Developer tab appears; in it choose **Install Plugin from ZIP** and pick the file.
 4. Open the Quick Access menu again; FrostDeck is in the plugin list.
 
-You need a Battle.net account. A free [SteamGridDB API key](https://www.steamgriddb.com/profile/preferences/api) is optional and turns on automatic artwork.
+You need a Battle.net account. Two free keys are optional: a [SteamGridDB API key](https://www.steamgriddb.com/profile/preferences/api) turns on automatic artwork, and a CurseForge API key adds CurseForge to addon search (see [CurseForge](#curseforge)).
+
+### Updating
+
+Download the new `FrostDeck.zip` and install it the same way, over the old one. There's no need to uninstall first: Decky replaces the plugin and restarts it. Your settings, Battle.net, games, shortcuts and WoW addons live outside the plugin folder and are kept. Avoid updating while FrostDeck is downloading Battle.net or installing an addon, since the restart interrupts it.
 
 ## Usage
 
@@ -46,23 +50,33 @@ You need a Battle.net account. A free [SteamGridDB API key](https://www.steamgri
 **World of Warcraft.** Once WoW is installed, a **World of Warcraft** section shows each flavour with its addon count. **Addons** opens the manager:
 
 - *Installed* shows what's in that flavour's AddOns folder, with Update buttons where a newer version exists and **Update all** at the top. Addons you copied in by hand are listed too, and known ones can be managed from here.
-- *Browse* has a search box across the catalog, WoWInterface and (with a key) CurseForge, with **Recommended for Steam Deck** and **Popular** beneath it. Press a name for details, screenshots and recent changes; press **Install** to install.
+- *Browse* has a search box across the catalog, WoWInterface and (with a key) CurseForge, with **Recommended for Steam Deck** and **Popular** beneath it. Results can be sorted and filtered by source. Press a name for details, screenshots and recent changes; press **Install** to install.
+- While an addon installs, its row shows a progress bar (*Downloading 42%*, then *Installing…*), including during **Update all**.
+- A result marked *Not for Retail* (or another flavour) has no build for the game version you have selected. *CurseForge app only* means the author doesn't allow downloads outside the CurseForge app.
 - Addons on GitHub that aren't listed can be added by repo name with **Add repo**.
 
-**Settings.** Proton build (shared by every shortcut, pinned so Battle.net stays stable), artwork key, repair, and reset.
+**Settings.** Proton build (shared by every shortcut, pinned so Battle.net stays stable), SteamGridDB and CurseForge keys, repair, and reset.
 
 ## Good to know
 
 - **Quit games from inside the game.** Blizzard games save settings on a clean exit. Steam's *Exit Game* ends the process immediately and WoW loses what it hadn't written.
 - **One Proton build for everything.** Switching builds mid-stream is the most common way Battle.net installs break. Change it from FrostDeck's dropdown so all shortcuts move together, and switch back if Battle.net complains.
 - **Call of Duty titles don't run.** Their anti-cheat has no Linux support. Cloud streaming or a Windows install are the alternatives.
-- **CurseForge needs an API key.** Add one under Settings → *CurseForge API key* (from [console.curseforge.com](https://console.curseforge.com)) and CurseForge joins the search. Projects whose authors only allow downloads through the CurseForge app are listed but marked *CurseForge app only*. See [Addon sources](#addon-sources).
+- **Close WoW before changing addons.** Install, update and remove are locked while the game is running.
+
+### CurseForge
+
+CurseForge search needs an API key. In FrostDeck → Settings, press **Get a CurseForge key**: it opens the [CurseForge developer console](https://console.curseforge.com) in Steam's browser. Sign in, create an organization if asked, open *API keys* and copy your key, then paste it into *CurseForge API key* and press **Save CurseForge key**. FrostDeck checks the key with CurseForge before saving it. A brand-new key can take a few minutes before search works.
+
+Some of the most popular CurseForge projects, such as Details!, Bagnon and Auctionator, only allow downloads through the CurseForge app. FrostDeck lists them as *CurseForge app only* and doesn't install them. Several of those authors also publish on GitHub or WoWInterface, so search there too; DBM and Bartender4, for example, install from GitHub through the catalog.
 
 ## How it works
 
 Steam runs Battle.net, not the plugin. FrostDeck creates non-Steam shortcuts, assigns a Proton build, and points every game at the same prefix, so there is one login and one install. Launching a game is a two-step dance: the current Battle.net client ignores `--exec="launch <game>"` on a cold start but honours it when a second copy forwards it over IPC once the client is up, so a small helper does exactly that inside the Steam session. Battle.net's own logs tell the plugin which games are installed and where.
 
-Addons are plain folders under `<flavour>/Interface/AddOns`. FrostDeck reads the client's `.build.info` for each flavour's version and checks every package's `.toc` interface versions before replacing anything, so a Classic-only package is refused for Retail with a plain message.
+Addons are plain folders under `<flavour>/Interface/AddOns`. FrostDeck reads the client's `.build.info` for each flavour's version and checks every package's `.toc` interface versions before replacing anything, so a Classic-only package is refused for Retail with a plain message. Packages are unpacked into a temporary folder first; only the addon folders they contain are replaced, and paths that try to escape the AddOns folder are skipped.
+
+On CurseForge, each project lists its newest file per game version and release type. FrostDeck picks by CurseForge's version type and major version, so Classic Era (1.15) and Forever (1.60) get their own builds and Retail 11.x builds aren't offered to Retail 12.x. Stable releases win over betas; alphas are never installed.
 
 ### Addon sources
 
@@ -71,7 +85,7 @@ Addons are plain folders under `<flavour>/Interface/AddOns`. FrostDeck reads the
 | GitHub releases (BigWigs packager manifests) | No | Most major addons: ConsolePort, DBM, BigWigs, Plater, Bartender4, … |
 | WoWInterface | No | About 8,000 addons, searchable |
 | Tukui | No | ElvUI |
-| CurseForge | Yes (Settings) | The long tail of addons; author opt-outs are respected |
+| CurseForge | Yes ([how](#curseforge)) | The long tail of addons; author opt-outs are respected |
 
 ## Troubleshooting
 
@@ -79,10 +93,12 @@ Addons are plain folders under `<flavour>/Interface/AddOns`. FrostDeck reads the
 - **A game opens Battle.net but doesn't start:** check the helper log; if Battle.net never reports *LaunchBinary*, open the game once from inside Battle.net, then try again.
 - **Battle.net misbehaves after a Proton change:** switch back to the previous build in Settings.
 - **Shortcuts stopped working after an update:** Settings → **Repair shortcuts** rewrites them from current state.
+- **No CurseForge results:** check Settings shows a CurseForge key. *CurseForge didn't accept that key* means it was copied incompletely; *Couldn't reach CurseForge* means the Deck is offline or CurseForge is down, so try again later.
+- **An install fails or an update doesn't show up:** the addon's source may have been unreachable. Press the refresh button on the *Installed* tab, which re-checks every source.
 
 ## Building
 
-Node 18+ and pnpm 9.
+Node 18+ and pnpm 9, plus Python 3 for packaging releases.
 
 ```sh
 pnpm i
@@ -107,7 +123,7 @@ It packages only files tracked by git, so stray files and personal keys stay out
 - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and the Steam Deck Homebrew community.
 - [NonSteamLaunchers](https://github.com/moraroy/NonSteamLaunchers-On-Steam-Deck) and [Lutris](https://lutris.net), whose Battle.net scripts documented the launch codes and config layout.
 - [ConsolePort](https://github.com/seblindfors/ConsolePort) by seblindfors, which makes WoW playable on a controller at all.
-- [SteamGridDB](https://www.steamgriddb.com), [WoWInterface](https://www.wowinterface.com) and [Tukui](https://tukui.org) for their APIs.
+- [SteamGridDB](https://www.steamgriddb.com), [WoWInterface](https://www.wowinterface.com), [Tukui](https://tukui.org) and [CurseForge](https://www.curseforge.com) for their APIs.
 - The [BigWigs packager](https://github.com/BigWigsMods/packager), whose release manifests make deterministic addon installs possible.
 
 FrostDeck is an independent project and is not affiliated with or endorsed by Blizzard Entertainment or Valve. Battle.net, World of Warcraft and Steam Deck are trademarks of their respective owners.
