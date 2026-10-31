@@ -91,7 +91,16 @@ pnpm run typecheck
 DECK_HOST=deck@<deck-ip> ./deploy.sh   # build, copy to the Deck over SSH, restart Decky
 ```
 
-`deploy.sh` stops Decky while it swaps files and verifies the copy, because Decky takes ownership of the plugins folder as root whenever it starts.
+`deploy.sh` stops Decky while it swaps files and verifies the copy, because Decky takes ownership of the plugins folder as root whenever it starts. On Windows, run it from Git Bash; without rsync it copies over ssh with tar. A personal CurseForge key in `./curseforge.key` (gitignored) is sent to your Deck only.
+
+To build the release zip, after `pnpm run build`:
+
+```sh
+python3 tools/package.py                                  # out/FrostDeck.zip, no CurseForge key
+python3 tools/package.py --curseforge-key path/to/key     # also ship an approved project key
+```
+
+It packages only files tracked by git, so stray files and personal keys stay out of releases.
 
 ## Credits
 
