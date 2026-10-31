@@ -1,5 +1,4 @@
 <div align="center">
-<img src="assets/banner.png" alt="FrostDeck" width="720">
 
 [![Release](https://img.shields.io/github/v/release/cconroy11/FrostDeck?label=release&color=3ea6a3)](https://github.com/cconroy11/FrostDeck/releases)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-informational)](LICENSE)
